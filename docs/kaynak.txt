@@ -1,0 +1,5 @@
+https://ieeexplore.ieee.org/document/10980347
+
+YOLO-Air: An Efficient Deep Learning Network for Small Object Detection in Drone-Based Imagery
+
+https://arxiv.org/pdf/2206.11988.pdf    

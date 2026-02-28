@@ -1,0 +1,152 @@
+1. /mavros/setpoint_raw/attitude Nedir?
+Bu topic, uçağın oryantasyonunu (hangi yöne baktığını) doğrudan kontrol etmeni sağlar.
+
+Position vs Attitude Karşılaştırması
+Kontrol Tipi	Topic	Ne Yapıyor
+Position	/mavros/setpoint_position/local	"X=100, Y=50, Z=30 noktasına git"
+Velocity	/mavros/setpoint_velocity/cmd_vel	"Saniyede 5m ileri git"
+Attitude	/mavros/setpoint_raw/attitude	"Burnunu 45° aşağı eğ, kanatları düz tut"
+Attitude kontrolü uçağın fiziksel duruşunu belirler:
+
+Pitch: Burun yukarı/aşağı (asansör - elevator)
+Roll: Sağa/sola yatma (kanatçıklar - ailerons)
+Yaw: Sağa/sola dönme (dümen - rudder)   
+
+
+2. Neden "Velocity" Değil de "Attitude" Kullanıyoruz?
+
+İHA'lar (özellikle sabit kanatlılar) havada süzülerek uçar. Bu yüzden "hız vektörü" (Velocity) ile kontrol etmek yerine, "duruş vektörü" (Attitude) ile kontrol etmek daha doğaldır.
+
+Örnek:
+
+Sabit Kanatlı İHA
+
+Sadece ileri gitmek için:
+
+Velocity: Hızı artır.
+
+Attitude: Burnunu biraz aşağı eğ (Pitch), motor gücünü artır.
+
+Sadece sağa dönmek için:
+
+Velocity: Yana doğru hız komutu (çoğu sabit kanatlı bunu yapamaz).
+
+Attitude: Sağa yatır (Roll), dümeni sağa çevir (Yaw).
+
+Özetle: Sabit kanatlılar, kanatlarının şekli ve açısı sayesinde havada kalır. Bu şekli kontrol etmek için Attitude kullanırız.
+
+
+
+
+
+. Quaternion Nedir?
+Problem: Gimbal Lock
+Euler açıları (pitch, roll, yaw) insanlar için anlaşılır ama matematikte "gimbal lock" denilen bir soruna yol açar - belirli açılarda sistem kilitlenir.
+
+Çözüm: Quaternion
+Quaternion, 3D rotasyonu 4 sayı ile temsil eder: 
+(x, y, z, w)
+
+Euler (anlaşılır):     Roll=0°, Pitch=-45°, Yaw=90°
+Quaternion (matematik): x=0.35, y=-0.35, z=0.35, w=0.85
+Neden Kullanıyoruz?
+ROS ve MAVROS tüm oryantasyon mesajlarını quaternion formatında bekler. Bu yüzden:
+
+python
+# Sen yazıyorsun (anlaşılır):
+publish_attitude(roll=0, pitch=-45, yaw=90, thrust=0.7)
+# Biz çeviriyoruz (euler_to_quaternion):
+msg.orientation.x = 0.35
+msg.orientation.y = -0.35
+msg.orientation.z = 0.35
+msg.orientation.w = 0.85
+# MAVROS'a gönderiyoruz (quaternion)
+
+
+dönüşüm formülü
+
+def euler_to_quaternion(self, roll, pitch, yaw):
+    # Yarım açıların sinüs/kosinüslerini hesapla
+    cr = cos(roll / 2)
+    sr = sin(roll / 2)
+    cp = cos(pitch / 2)
+    sp = sin(pitch / 2)
+    cy = cos(yaw / 2)
+    sy = sin(yaw / 2)
+    
+    # Quaternion bileşenleri
+    w = cr * cp * cy + sr * sp * sy
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    
+    return x, y, z, w
+
+
+
+
+SEN          →      euler_to_quaternion()      →      MAVROS/PX4
+pitch=-45°          matematiksel dönüşüm              quaternion
+roll=0°                                               formatında
+yaw=90°                                               mesaj
+
+
+
+
+
+
+Kontrol Methodları Karşılaştırması
+Method	Ne Zaman Kullan	Avantaj	Dezavantaj
+Position Setpoint	Normal uçuş, waypoint takibi	Kolay, stabil	Agresif manevra zor
+Velocity Setpoint	Sabit hızda hareket	Hız kontrolü iyi	Pozisyon hassasiyeti düşük
+Attitude Setpoint	Agresif manevra, dalış, akrobasi	Tam kontrol	Karmaşık, tehlikeli
+Senaryolara Göre Öneriler
+1. Normal Yükseliş/Alçalma
+python
+# Position setpoint kullan - basit ve güvenli
+self.publish_setpoint(x, y, z=100)  # 100m'ye çık
+self.publish_setpoint(x, y, z=50)   # 50m'ye in
+✅ PX4 otopilotu yumuşak geçiş yapar
+
+2. Hızlı Tırmanma/Dalış (Orta seviye)
+python
+# Velocity setpoint kullan
+self.publish_velocity(vx=10, vy=0, vz=5)   # İleri + yukarı
+self.publish_velocity(vx=10, vy=0, vz=-5)  # İleri + aşağı
+✅ Hız kontrolü sağlar, tehlikeli değil
+
+3. Agresif Manevra (Kamikaze, akrobasi)
+python
+# Attitude setpoint kullan - tam kontrol
+self.publish_attitude(roll=0, pitch=-45, yaw=90, thrust=0.7)  # Dalış
+self.publish_attitude(roll=0, pitch=+30, yaw=90, thrust=1.0)  # Pull-up
+self.publish_attitude(roll=60, pitch=0, yaw=90, thrust=0.8)   # Keskin viraj
+⚠️ Tehlikeli! Sadece gerektiğinde kullan
+
+
+
+
+
+
+Özet Tablo
+Manevra	Önerilen Method
+Waypoint'e git	publish_setpoint()
+
+Loiter / Hover	publish_setpoint()
+
+Sabit hızda uç	publish_velocity()
+
+Yumuşak iniş/çıkış	publish_setpoint()
+
+45° dalış (kamikaze)	publish_attitude()
+
+Keskin pull-up	publish_attitude()
+
+Barrel roll	publish_attitude()
+
+
+
+Soru: "Uçağın fiziksel duruşunu (pitch/roll) doğrudan kontrol etmem gerekiyor mu?"
+
+EVET → publish_attitude() kullan
+HAYIR → publish_setpoint() veya publish_velocity() kullan

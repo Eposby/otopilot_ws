@@ -1,0 +1,53 @@
+# Katmanlı Otonom Mimari — Walkthrough
+
+## Oluşturulan Dosyalar
+
+### Custom Messages (4 yeni)
+
+| Dosya | Açıklama |
+|-------|----------|
+| [TelemetryStatus.msg](file:///home/mert/otopilot_ws/src/iha_messages/msg/TelemetryStatus.msg) | Hız, irtifa, batarya, GPS, kritik bayrak |
+| [TargetInfo.msg](file:///home/mert/otopilot_ws/src/iha_messages/msg/TargetInfo.msg) | Hedef konum, güven, bbox, sınıf |
+| [SafetyOverride.msg](file:///home/mert/otopilot_ws/src/iha_messages/msg/SafetyOverride.msg) | Acil durum modu, sebep |
+| [MissionCommand.msg](file:///home/mert/otopilot_ws/src/iha_messages/msg/MissionCommand.msg) | Taktiksel emir (GOTO/TRACK/ORBIT) |
+
+### Node'lar (5 yeni — `iha_görev/`)
+
+| Katman | Node | Dosya |
+|--------|------|-------|
+| Algı | Telemetry Monitor | [telemetry_monitor.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/telemetry_monitor.py) |
+| Algı | Vision Processor | [vision_processor.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/vision_processor.py) |
+| Refleks | Safety Watchdog | [safety_watchdog.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/safety_watchdog.py) |
+| Karar | Mission Commander | [mission_commander.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/mission_commander.py) |
+| Yörünge | Trajectory Generator | [trajectory_generator.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/trajectory_generator.py) |
+
+### Entegrasyon
+
+| Dosya | Değişiklik |
+|-------|------------|
+| [gorev_bringup.launch.py](file:///home/mert/otopilot_ws/src/iha_otopilot/launch/gorev_bringup.launch.py) | [NEW] 5 node'u tek seferde başlatır |
+| [setup.py](file:///home/mert/otopilot_ws/src/iha_otopilot/setup.py) | 5 entry point + launch data_files |
+| [package.xml](file:///home/mert/otopilot_ws/src/iha_otopilot/package.xml) | mavros_msgs, iha_messages dependency |
+| [CMakeLists.txt](file:///home/mert/otopilot_ws/src/iha_messages/CMakeLists.txt) | 4 yeni msg dosyası |
+
+## Doğrulama
+
+- ✅ Python syntax kontrolü — 5/5 dosya başarılı
+- ✅ `colcon build --packages-select iha_messages` — başarılı
+- ✅ `colcon build --packages-select iha_otopilot` — başarılı
+
+## Kullanım
+
+```bash
+# Tüm sistemi başlat:
+ros2 launch iha_otopilot gorev_bringup.launch.py
+
+# Mock hedef gönder:
+ros2 topic pub --once /uav1/mock_target geometry_msgs/msg/Point "{x: 150.0, y: -40.0, z: 100.0}"
+
+# Dinamik waypoint:
+ros2 topic pub --once /uav1/mock_dynamic_wp geometry_msgs/msg/Point "{x: 50.0, y: -20.0, z: 0.0}"
+
+# Yasaklı alan:
+ros2 topic pub --once /uav1/mock_nfz geometry_msgs/msg/Point "{x: 100.0, y: 100.0, z: 20.0}"
+```

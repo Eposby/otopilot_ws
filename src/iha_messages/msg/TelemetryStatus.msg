@@ -1,0 +1,13 @@
+float32 airspeed
+float32 groundspeed
+float32 altitude
+float32 battery_voltage
+float32 battery_remaining
+uint8 gps_fix_type
+int32 gps_satellites
+float32 pos_x
+float32 pos_y
+float32 pos_z
+bool is_critical
+string warning_message
+bool is_connected

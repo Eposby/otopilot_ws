@@ -1,0 +1,103 @@
+Çoklu Hayali Uçak Simülasyonu: Otonom Düşman İHA'lar
+Kendi simülasyon ortamınızda birden fazla sabit kanat uçak (plane) spawn edip, her birinin otonom olarak belirlenen waypoint'ler arasında uçmasını sağlayacak bir altyapı oluşturulacak.
+
+Mevcut Durum
+PX4 SITL: ~/PX4-Autopilot/ kurulu, px4_sitl_default build mevcut
+Gazebo Classic 11: Kurulu ve çalışır durumda
+Mevcut Script: teknofest_sim.sh → iris (multicopter) spawn ediyor
+Plane Modeli: plane.sdf.jinja modeli mevcut (Tools/simulation/gazebo-classic/sitl_gazebo-classic/models/plane/)
+Airframe: 1030_gazebo-classic_plane airframe mevcut
+Operasyon Alanı Koordinatları: 
+hss_waypoint_mission.py
+'de tanımlı (40.229-40.233 lat, 28.998-29.009 lon)
+Mimari
+teknofest_multi_plane.sh
+Gazebo Server
+PX4 SITL #0UDP:14540
+PX4 SITL #1UDP:14541
+PX4 SITL #2UDP:14542
+MAVROS #0ns: /uav0
+MAVROS #1ns: /uav1
+MAVROS #2ns: /uav2
+enemy_plane_mission.py--ns uav0
+enemy_plane_mission.py--ns uav1
+enemy_plane_mission.py--ns uav2
+Gazebo ClientGörsel İzleme
+Proposed Changes
+Simülasyon Launch
+[NEW] 
+teknofest_multi_plane.sh
+Çoklu sabit kanat uçak spawn eden bash scripti. Mevcut teknofest_sim.sh'den esinlenerek, plane modeli ile çalışacak.
+
+Temel mantık:
+
+Gazebo server'ı başlat (operasyon alanı koordinatlarına ayarlanmış)
+N adet PX4 SITL instance başlat (-i 0, -i 1, ... ile farklı instance)
+Her instance için plane SDF modelini farklı konumlarda spawn et
+Port ayrımı: Instance i → MAVLink UDP 14560+i, TCP 4560+i, MAVROS 14540+i
+# Her uçak için:
+PX4_SIM_MODEL=plane ./build/px4_sitl_default/bin/px4 -i $i ...
+gz model --spawn-file=plane.sdf --model-name=plane_$i --x=$X --y=$Y
+Düşman Uçak Misyon Scripti
+[NEW] 
+enemy_plane_mission.py
+Her bir hayali düşman uçağı yöneten ROS2 node. Namespace parametresi ile hangi uçağı kontrol edeceğini belirler.
+
+Özellikler:
+
+--ns argümanı ile MAVROS namespace belirle (örn: uav1, uav2)
+MAVROS topic'leri namespace'e göre ayarlanır: /{ns}/mavros/state, /{ns}/mavros/setpoint_position/local vb.
+Otonom uçuş adımları: TAKEOFF → PATROL (waypoint döngüsü)
+Operasyon alanı köşelerinde waypoint'ler arası sürekli devriye
+Farklı irtifa ve hızlarda uçuş profili (çarpışma önleme)
+State Machine:
+
+INIT → TAKEOFF → PATROL (WP1 → WP2 → WP3 → WP4 → WP1 → ...)
+Parametre farklılaştırma (uçaklar arası çarpışmayı önlemek):
+
+Parametre	UAV1 (düşman 1)	UAV2 (düşman 2)
+İrtifa	80m	120m
+Hız	15 m/s	18 m/s
+Başlangıç WP	WP1	WP3
+ROS2 Paket Yapılandırması
+[MODIFY] 
+setup.py
+Yeni entry point eklenecek:
+
++'enemy_plane=iha_otopilot_mavros.enemy_plane_mission:main',
+MAVROS Launch (Her düşman uçak için ayrı MAVROS)
+Her hayali uçak için ayrı bir MAVROS instance başlatılacak. Bu, teknofest_multi_plane.sh içinde veya ayrı terminallerde yapılacak:
+
+# Düşman 1 (instance 0):
+ros2 launch mavros px4.launch fcu_url:="udp://:14540@127.0.0.1:14557" namespace:="uav0"
+# Düşman 2 (instance 1):
+ros2 launch mavros px4.launch fcu_url:="udp://:14541@127.0.0.1:14558" namespace:="uav1"
+IMPORTANT
+
+Kendi ana uçağınız (HSS misyon) da bu ortamda çalışacaksa, ona ayrı bir instance ve MAVROS verilmeli. Örneğin instance 0 → ana uçak, instance 1,2 → düşman uçaklar.
+
+Çalıştırma Adımları
+Terminal 1: Gazebo + PX4 SITL'leri başlat
+  cd ~/otopilot_ws
+  bash src/iha_otopilot/scripts/teknofest_multi_plane.sh 3
+Terminal 2: Ana uçak MAVROS
+  ros2 launch mavros px4.launch fcu_url:="udp://:14540@127.0.0.1:14557"
+Terminal 3: Düşman 1 MAVROS
+  ros2 run mavros mavros_node --ros-args -r __ns:=/uav1 -p fcu_url:="udp://:14541@127.0.0.1:14558"
+Terminal 4: Düşman 2 MAVROS
+  ros2 run mavros mavros_node --ros-args -r __ns:=/uav2 -p fcu_url:="udp://:14542@127.0.0.1:14559"
+Terminal 5: Düşman 1 Misyon
+  ros2 run iha_otopilot enemy_plane --ros-args -p namespace:=uav1
+Terminal 6: Düşman 2 Misyon
+  ros2 run iha_otopilot enemy_plane --ros-args -p namespace:=uav2
+Terminal 7: HSS Ana Misyon (kendi uçağınız)
+  ros2 run iha_otopilot hss_mission
+Verification Plan
+Manuel Doğrulama
+Simülasyon başlatma testi: teknofest_multi_plane.sh 2 çalıştırılıp Gazebo'da 2 adet plane modeli görünmeli
+MAVROS bağlantı testi: Her uçak için ros2 topic echo /{ns}/mavros/state ile bağlantı doğrulanmalı
+Otonom uçuş testi: enemy_plane_mission.py çalıştırılıp uçağın kalkış yapıp waypoint'ler arası dolaştığı gözlemlenmeli
+Çoklu uçak testi: 2 düşman uçağın aynı anda farklı irtifada devriye gezdiği Gazebo'da görülmeli
+NOTE
+
+Bu testler simülasyon ortamı gerektirdiği için (Gazebo + PX4 SITL) otomatik test yazılamaz. Kullanıcı tarafından manuel olarak doğrulanmalıdır.

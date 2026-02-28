@@ -1,0 +1,154 @@
+# QR Vision Node — Entegrasyon Özeti
+
+## Yapılan Değişiklikler
+
+### Yeni Dosyalar
+| Dosya | Açıklama |
+|---|---|
+| [qr_vision_node.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/qr_vision_node.py) | Ana ROS 2 node — kamera → YOLO → Kalman → QR → TargetInfo |
+| [qr_tracker.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/qr_tracker.py) | Kalman filtre tabanlı hedef takipçisi |
+| [qr_reader.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/qr_reader.py) | Asenkron QR kod okuyucu (multiprocessing) |
+| [qr_utils.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/qr_utils.py) | Model indirme + GStreamer yardımcıları |
+| `iha_görev/models/` | [best.pt](file:///home/mert/otopilot_ws/SavasanIHA2026_QR_1/SavasanIHA2026_Yerel-main/best.pt), `detect.*`, `sr.*` model dosyaları |
+
+### Değiştirilen Dosyalar
+
+```diff:setup.py
+from setuptools import find_packages, setup
+
+package_name = 'iha_otopilot'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', ['launch/gorev_bringup.launch.py']),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='mert',
+    maintainer_email='mert@todo.todo',
+    description='TODO: Package description',
+    license='TODO: License declaration',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+            'pilot= iha_otopilot.ucus_kontrol:main',
+            'gozcu=iha_otopilot.goruntu_isleme:main',
+            'pil_durumu=iha_otopilot.pil_durumu:main',
+            'hedef_bilgi=iha_otopilot.hedef_durum:main',
+            'emir_client=iha_otopilot.komut_client:main',
+            'emir_server=iha_otopilot.komut_server:main',
+            'camera=iha_otopilot.goruntu_isleme:main',
+            'test=iha_otopilot.simple_way:main',
+            'point=iha_otopilot.three_point:main',
+            'camera_bridge=iha_otopilot_mavros.gz_bridge_camera.py',
+            'qr=iha_otopilot_mavros.qr_mission.py'
+            'track=iha_otopilot_mavros.track_mission.py',
+            'hss_mission=iha_otopilot_mavros.hss_waypoint_mission:main',
+            'enemy_plane=iha_otopilot_mavros.enemy_plane_mission:main',
+            'dynamic_mission=iha_otopilot_mavros.dynamic_mission_manager:main',
+            'telemetry_monitor=iha_görev.telemetry_monitor:main',
+            'vision_processor=iha_görev.vision_processor:main',
+            'safety_watchdog=iha_görev.safety_watchdog:main',
+            'mission_commander=iha_görev.mission_commander:main',
+            'trajectory_generator=iha_görev.trajectory_generator:main',
+
+        ],
+    },
+)
+===
+from setuptools import find_packages, setup
+
+package_name = 'iha_otopilot'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', ['launch/gorev_bringup.launch.py']),
+    ],
+    install_requires=['setuptools'],
+    package_data={
+        'iha_görev': ['models/*.pt', 'models/*.caffemodel', 'models/*.prototxt'],
+    },
+    zip_safe=True,
+    maintainer='mert',
+    maintainer_email='mert@todo.todo',
+    description='TODO: Package description',
+    license='TODO: License declaration',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+            'pilot= iha_otopilot.ucus_kontrol:main',
+            'gozcu=iha_otopilot.goruntu_isleme:main',
+            'pil_durumu=iha_otopilot.pil_durumu:main',
+            'hedef_bilgi=iha_otopilot.hedef_durum:main',
+            'emir_client=iha_otopilot.komut_client:main',
+            'emir_server=iha_otopilot.komut_server:main',
+            'camera=iha_otopilot.goruntu_isleme:main',
+            'test=iha_otopilot.simple_way:main',
+            'point=iha_otopilot.three_point:main',
+            'camera_bridge=iha_otopilot_mavros.gz_bridge_camera.py',
+            'qr=iha_otopilot_mavros.qr_mission.py'
+            'track=iha_otopilot_mavros.track_mission.py',
+            'hss_mission=iha_otopilot_mavros.hss_waypoint_mission:main',
+            'enemy_plane=iha_otopilot_mavros.enemy_plane_mission:main',
+            'dynamic_mission=iha_otopilot_mavros.dynamic_mission_manager:main',
+            'telemetry_monitor=iha_görev.telemetry_monitor:main',
+            'vision_processor=iha_görev.vision_processor:main',
+            'safety_watchdog=iha_görev.safety_watchdog:main',
+            'mission_commander=iha_görev.mission_commander:main',
+            'trajectory_generator=iha_görev.trajectory_generator:main',
+            'qr_vision=iha_görev.qr_vision_node:main',
+
+        ],
+    },
+)
+```
+
+## Mimari
+
+```mermaid
+graph LR
+    A["Gazebo Kamera<br/>/camera/image_raw"] --> B["qr_vision_node"]
+    B -->|TargetInfo| C["/gorev/qr_target_info"]
+    B -->|String| D["/gorev/qr_result"]
+    B -->|cv2.imshow| E["GUI Penceresi"]
+    C --> F["qr2.py / mission_commander<br/>(lateral düzeltme)"]
+```
+
+## Çalıştırma
+
+```bash
+# Terminal 1: Simülasyon + MAVROS (her zamanki gibi)
+# Terminal 2: Kamera köprüsü (Gazebo → ROS)
+ros2 run iha_otopilot camera_bridge
+
+# Terminal 3: QR Vision Node
+source /opt/ros/humble/setup.bash
+source ~/otopilot_ws/install/setup.bash
+ros2 run iha_otopilot qr_vision
+```
+
+## Build Doğrulaması
+
+✅ `colcon build --packages-select iha_otopilot` — başarılı
+✅ Tüm Python dosyaları install dizinine kopyalandı
+✅ Model dosyaları ([best.pt](file:///home/mert/otopilot_ws/SavasanIHA2026_QR_1/SavasanIHA2026_Yerel-main/best.pt), `detect.*`, `sr.*`) [models/](file:///home/mert/otopilot_ws/SavasanIHA2026_QR_1/SavasanIHA2026_Yerel-main/utils.py#10-50) altında mevcut

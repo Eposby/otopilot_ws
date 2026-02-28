@@ -1,0 +1,7 @@
+string komut_adi
+float32 parametre
+
+---
+
+bool basari_durumu
+string mesaj

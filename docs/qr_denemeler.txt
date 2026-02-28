@@ -1,0 +1,90 @@
+Ön İşleme                                                  
+Grayscale dönüşüm                                         
+Gaussian blur (gürültü azaltma)                           
+CLAHE (Contrast Limited Adaptive Histogram Equalization)  
+Adaptive thresholding  
+
+
+
+QR Tespiti                                   
+Aşama 1: YOLO-based QR lokalizasyonu (hız için)          
+Aşama 2: ROI extraction + Pyzbar decode (doğruluk için) 
+
+
+
+Perspektif Düzeltme                                        
+Corner detection (QR finder patterns)                     
+Homography matrix hesaplama                               
+Perspective warp transform 
+
+
+
+
+
+Decode & Doğrulama                                         
+Pyzbar ile decode                                         
+Checksum doğrulama                                        
+Birden fazla frame'de tutarlılık kontrolü 
+
+
+
+hugging face models
+
+
+
+https://huggingface.co/facebook/detr-resnet-50
+https://huggingface.co/Piero2411/YOLOV8s-Barcode-Detection
+https://ieeexplore.ieee.org/document/10980347
+http://huggingface.co/papers/2107.10833
+https://huggingface.co/fal/FLUX.2-Tiny-AutoEncoder
+https://medium.com/@zhuocen93/an-overview-of-espcn-an-efficient-sub-pixel-convolutional-neural-network-b76d0a6c875e
+https://arxiv.org/html/2410.05497v1
+
+================================================================
+
+
+### 1. Donanımsal Çözümler (İlk Savunma Hattı)
+
+Yazılım ne kadar iyi olursa olsun, bulanık bir görselden veri çıkaramaz.
+
+* **Global Shutter Kamera:** Savaşan İHA'da kesinlikle "Rolling Shutter" (sırayla tarayan) kamera kullanma. Dalış hızında görüntü "jöle" gibi titrer. Global shutter bir kamera (örn: AR0234 sensörlü kameralar), tüm pikselleri aynı anda yakaladığı için bulanıklığı minimize eder.
+* **Yüksek Shutter Speed (Enstantane):** Kameranın pozlama süresini manuel olarak çok düşük tutmalısın (1/2000 veya daha hızlı). Bu, görüntünün karanlık çıkmasına neden olabilir, bu yüzden geniş diyaframlı bir lens kullanmalısın.
+* **Fiziksel Gimbal veya Amortisör:** Kamerayı gövdeye doğrudan bağlama. Motor titreşimlerini sönümlemek için karbon fiber mountlar ve kauçuk toplar kullan.
+
+---
+
+### 2. Yazılımsal Çözümler (Görüntü İşleme)
+
+150 metreden dalış yaparken QR kod kadrajda sadece birkaç piksel görünecektir.
+
+#### A. Süper Çözünürlük (Super-Resolution)
+
+Hugging Face üzerinde bulunan **Real-ESRGAN** veya **Swapping Autoencoder** gibi hafif modelleri kullanarak, İHA kamerasından gelen küçük ve bozuk QR bölgesini yapay zeka ile netleştirebilirsin.
+
+* **Strateji:** Önce YOLO ile QR'ın olduğu bölgeyi bul (tespit et), sonra sadece o küçük kareyi bir "Super-Resolution" modeline sokarak piksellerini doldur.
+
+#### B. Image Deblurring (Netleştirme)
+
+Dalış sırasındaki titreşimi çözmek için **NAFNet** veya **Restormer** gibi modellerin "lightweight" versiyonlarını kullanabilirsin. Bu modeller hareket bulanıklığını matematiksel olarak tersine çevirir.
+
+---
+
+### 3. Model Eğitimi İçin Dataset Manipülasyonu
+
+Hugging Face'ten indirdiğin temiz QR datasetlerini kendi şartlarına uyarlaman (Augmentation) şart:
+
+* **Motion Blur Ekleme:** Datasetindeki tüm resimlere Python ile rastgele yönlerde "hareket bulanıklığı" ekle.
+* **Gaussian Noise:** Titreşimden kaynaklanan parazitleri simüle et.
+* **Perspektif Bozulması:** Uçak dalış yaparken QR'a tam tepeden bakmaz, açılı bakar. Veri setindeki QR'ları 45-60 derece eğerek eğit.
+
+---
+
+### 4. Yazılım Mimarisi (Pipeline)
+
+Sistemini şu sırayla kurarsan 50 metre kala o QR'ı okuma şansın %90 artar:
+
+1. **Detection (YOLOv11n):** En hızlı modelle QR'ın yerini bul. (150-100m arası sadece takip yapar).
+2. **Focus & Crop:** QR yaklaştıkça (100-70m) kameradan gelen o bölgeyi yüksek çözünürlükte kırp.
+3. **Pre-process:** Kırpılan bölgeye "Adaptive Thresholding" ve "Denoising" uygula.
+4. **Multi-frame Voting:** Tek bir kareyi okumaya çalışma. Ardışık 5 kareden gelen verileri karşılaştır.
+

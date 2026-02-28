@@ -1,0 +1,13 @@
+bool detected
+float32 target_x
+float32 target_y
+float32 target_z
+float32 confidence
+float32 bbox_cx
+float32 bbox_cy
+float32 bbox_w
+float32 bbox_h
+string target_class
+int32 target_id
+float32 error_x
+float32 error_y

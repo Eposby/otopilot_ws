@@ -1,0 +1,177 @@
+# Katmanlı Otonom Mimari (Layered Autonomous Architecture)
+
+Mevcut [dynamic_mission_manager.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_otopilot_mavros/dynamic_mission_manager.py)'deki tüm mantığı **5 bağımsız ROS 2 düğümüne** ayırıyoruz. Her düğüm kendi sorumluluk alanına odaklanır, topic'ler üzerinden haberleşir.
+
+## Mimari Genel Bakış
+
+```mermaid
+graph TD
+    subgraph "Katman 1: Algı"
+        TM["telemetry_monitor"]
+        VP["vision_processor"]
+    end
+    subgraph "Katman 2: Refleks"
+        SW["safety_watchdog"]
+    end
+    subgraph "Katman 3: Karar"
+        MC["mission_commander"]
+    end
+    subgraph "Katman 4: Yörünge"
+        TG["trajectory_generator"]
+    end
+
+    MAVROS["MAVROS"]
+
+    MAVROS -->|state, gps, local_pos, battery| TM
+    TM -->|/antigravity/telemetry_status| SW
+    TM -->|/antigravity/telemetry_status| MC
+    VP -->|/antigravity/target_info| MC
+    SW -->|/antigravity/safety_override| TG
+    MC -->|/antigravity/mission_command| TG
+    TG -->|setpoint_position, attitude| MAVROS
+    MC -->|set_mode, arm/disarm| MAVROS
+```
+
+## Proposed Changes
+
+### Custom Messages (`iha_messages`)
+
+#### [NEW] `TelemetryStatus.msg`
+```
+float32 airspeed          # Hava hızı (m/s)
+float32 groundspeed       # Yer hızı (m/s)
+float32 altitude          # İrtifa (m)
+float32 battery_voltage   # Batarya voltajı
+float32 battery_remaining # Batarya yüzdesi (0-1)
+uint8 gps_fix_type        # GPS fix kalitesi (0-6)
+int32 gps_satellites      # GPS uydu sayısı
+float32 pos_x             # Local ENU X (m)
+float32 pos_y             # Local ENU Y (m)
+float32 pos_z             # Local ENU Z (m)
+bool is_critical          # Kritik durum bayrağı
+string warning_message    # Uyarı mesajı
+```
+
+#### [NEW] `TargetInfo.msg`
+```
+bool detected             # Hedef tespit edildi mi
+float32 target_x          # Hedef local X (m)
+float32 target_y          # Hedef local Y (m)
+float32 target_z          # Hedef irtifa (m)
+float32 confidence        # Tespit güven oranı (0-1)
+float32 bbox_cx           # Bounding box merkez X (normalize 0-1)
+float32 bbox_cy           # Bounding box merkez Y (normalize 0-1)
+float32 bbox_w            # Bounding box genişlik
+float32 bbox_h            # Bounding box yükseklik
+string target_class       # Hedef sınıfı (düşman, QR, vb)
+```
+
+#### [NEW] `SafetyOverride.msg`
+```
+bool override_active      # Acil durum aktif mi
+string override_mode      # Mod: LOITER, RTL, FULL_THROTTLE
+string reason             # Sebep açıklaması
+float32 override_alt      # Zorla irtifa (0 = değiştirme)
+```
+
+#### [NEW] `MissionCommand.msg`
+```
+string command_type       # GOTO, TRACK, ORBIT, RTL, LAND
+float32 target_x          # Hedef X (local ENU m)
+float32 target_y          # Hedef Y (local ENU m)
+float32 target_z          # Hedef Z (m)
+float32 speed             # İstenilen hız (m/s)
+string state_name         # Mevcut state (log için)
+bool is_dynamic_target    # Hedef hareket ediyor mu
+```
+
+---
+
+### Node Dosyaları (`iha_görev/`)
+
+#### [NEW] [telemetry_monitor.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/telemetry_monitor.py)
+**Katman:** Algı | **Frekans:** 10 Hz
+
+- MAVROS'tan dinler: `/mavros/state`, `/mavros/global_position/global`, `/mavros/local_position/pose`, `/mavros/battery`
+- `TelemetryStatus` mesajı yayınlar → `/antigravity/telemetry_status`
+- Stall hızı, düşük batarya, GPS kaybı gibi tehditleri `is_critical` bayrağı ile raporlar
+
+#### [NEW] [vision_processor.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/vision_processor.py)
+**Katman:** Algı (Gözler) | **Frekans:** Event-driven
+
+- Kamera/YOLO tespiti dinler veya mock topic'ten veri alır: `/uav1/mock_target`
+- `TargetInfo` mesajı yayınlar → `/antigravity/target_info`
+- Gerçek kamera olmadan test için `geometry_msgs/Point` ile mock hedef verisi kabul eder
+
+#### [NEW] [safety_watchdog.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/safety_watchdog.py)
+**Katman:** Refleks | **Frekans:** 20 Hz
+
+- `/antigravity/telemetry_status` dinler
+- Stall hızı, batarya kritik, GPS kaybı → `SafetyOverride` yayınlar → `/antigravity/safety_override`
+- `trajectory_generator` bu mesajı aldığında beynin kararını ezer ve doğrudan güvenlik komutunu MAVROS'a basar
+
+#### [NEW] [mission_commander.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/mission_commander.py)
+**Katman:** Karar (HFSM Beyin) | **Frekans:** 20 Hz
+
+Bu, mevcut [dynamic_mission_manager.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_otopilot_mavros/dynamic_mission_manager.py)'nin beyin kısmının yeniden yapılandırılmış hali:
+- State Machine: `INIT → TAKEOFF → PATROL → TRACKING → RES_AREA → SEARCHING → RTL → LAND`
+- `/antigravity/telemetry_status` ve `/antigravity/target_info` dinler
+- Dinamik waypoint kuyruğu (`/uav1/mock_dynamic_wp`) ve NFZ listesi (`/uav1/mock_nfz`)
+- Karar verdikten sonra `MissionCommand` yayınlar → `/antigravity/mission_command`
+- ARM/Disarm ve mod değişiklikleri doğrudan MAVROS service'lerine gönderilir
+
+#### [NEW] [trajectory_generator.py](file:///home/mert/otopilot_ws/src/iha_otopilot/iha_görev/trajectory_generator.py)
+**Katman:** Yörünge | **Frekans:** 10 Hz (sürekli setpoint)
+
+- `/antigravity/mission_command` dinler → beynin taktiksel emrini alır
+- `/antigravity/safety_override` dinler → acil durum geldiyse beyni ezer
+- MAVROS'a sürekli setpoint basar: `/mavros/setpoint_position/local`
+- OFFBOARD öncesi warmup mantığı burada (setpoint counter)
+
+---
+
+### Entegrasyon Dosyaları
+
+#### [NEW] [antigravity_bringup.launch.py](file:///home/mert/otopilot_ws/src/iha_otopilot/launch/antigravity_bringup.launch.py)
+Tüm 5 node'u tek komutla başlatır:
+```bash
+ros2 launch iha_otopilot antigravity_bringup.launch.py
+```
+
+#### [MODIFY] [setup.py](file:///home/mert/otopilot_ws/src/iha_otopilot/setup.py)
+- 5 yeni entry point eklenir
+- `data_files`'a launch dosyası eklenir
+
+#### [MODIFY] [package.xml](file:///home/mert/otopilot_ws/src/iha_otopilot/package.xml)
+- `iha_messages` dependency eklenir
+- `mavros_msgs` dependency eklenir
+
+#### [MODIFY] [CMakeLists.txt](file:///home/mert/otopilot_ws/src/iha_messages/CMakeLists.txt) + [package.xml](file:///home/mert/otopilot_ws/src/iha_messages/package.xml)
+- 4 yeni mesaj dosyası eklenir
+
+---
+
+## Topic Haritası
+
+| Topic | Publisher | Subscriber(s) | Mesaj Tipi |
+|-------|----------|---------------|------------|
+| `/antigravity/telemetry_status` | telemetry_monitor | safety_watchdog, mission_commander | `TelemetryStatus` |
+| `/antigravity/target_info` | vision_processor | mission_commander | `TargetInfo` |
+| `/antigravity/safety_override` | safety_watchdog | trajectory_generator | `SafetyOverride` |
+| `/antigravity/mission_command` | mission_commander | trajectory_generator | `MissionCommand` |
+| `/uav1/mock_dynamic_wp` | Terminal (pub) | mission_commander | `geometry_msgs/Point` |
+| `/uav1/mock_nfz` | Terminal (pub) | mission_commander | `geometry_msgs/Point` |
+| `/uav1/mock_target` | Terminal (pub) | vision_processor | `geometry_msgs/Point` |
+
+## Verification Plan
+
+### Build Kontrolü
+```bash
+cd ~/otopilot_ws
+colcon build --packages-select iha_messages iha_otopilot
+source install/setup.bash
+ros2 launch iha_otopilot antigravity_bringup.launch.py
+```
+
+> [!IMPORTANT]
+> Gerçek uçuş testi PX4 SITL + Gazebo + MAVROS ortamında yapılmalıdır.
