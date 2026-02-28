@@ -1,6 +1,6 @@
 # Otopilot Çalışma Alanı (otopilot_ws)
 
-Bu repo, TEKNOFEST Savaşan İHA (Kamikaze) yarışması için geliştirilmiş otonom uçuş, hedef tespiti ve görev yönetim sistemini içerir. ROS 2 (Humble) ve MAVROS tabanlı olarak çalışır.
+Bu repo, TEKNOFEST Savaşan İHA yarışması için geliştirilmiş otonom uçuş, hedef tespiti, QR okuma ve görev yönetim sistemini içerir. ROS 2 (Humble) ve MAVROS tabanlı olarak çalışır.
 
 Kod yapısı ve hiyerarşisi hala geliştirme aşamasındadır !!!
 ## Özellikler
