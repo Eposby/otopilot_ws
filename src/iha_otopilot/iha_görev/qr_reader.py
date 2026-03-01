@@ -174,3 +174,34 @@ class AsyncQRReader(multiprocessing.Process):
                 pass
 
         print("🛑 QR Process: Stopped.")
+
+
+
+
+
+
+    # def run(self):
+    #     # ... (modeller yüklenir vs.)
+        
+    #     while self._is_running.value:
+    #         # ...
+    #         try:
+    #             frame = self.frame_queue.get(timeout=0.1)
+                
+    #             # ======= SENİN İŞLEMLERİNİ EKLEYECEĞİN YER BURASI =======
+    #             # Gelen 'frame' sadece QR kodun olduğu küçük hedeftir.
+                
+    #             # Örnek 1: Resmi Griye Çevirme
+    #             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+    #             # Örnek 2: Otsu Thresholding ile gereksiz arkaplanı silip siyah/beyaz yapma
+    #             _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                
+    #             # Örnek 3: Parazitleri silme (Blur/Median)
+    #             # blur = cv2.medianBlur(thresh, 3)
+                
+    #             # İşlenmiş resmi QR okuyucuya veriyoruz (Bazen orijinali de okutmak iyi olabilir, ikisini de deneriz)
+    #             res, _ = detector.detectAndDecode(thresh) 
+    #             # ========================================================
+                
+    #             # ...

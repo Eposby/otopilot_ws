@@ -18,11 +18,36 @@ Dinlediği Topic:
 
 Çalıştırma:
   ros2 run iha_otopilot qr_vision
+
+
+qr_vision_node.py: sistemin çalışması için gerekli parametreleri içerir. bunlar SEARCH_SIZE, TRACK_ROI_SIZE, CONF_THRESHOLD, LOST_THRESHOLD, QR_PADDING
+                    SEARCH_SIZE: arama modunda resim boyutu
+                    TRACK_ROI_SIZE: takip modunda ROI boyutu
+                    CONF_THRESHOLD: YOLO güven eşiği
+                    LOST_THRESHOLD: kaçılan frame sayısını belirler
+                    QR_PADDING: QR crop çerçevesine padding oranı
+
+
+
+qr_tracker.py: Hedef (uçak/QR) tespit edildikten sonra, hedef anlık olarak kameradan çıksa veya kaybolsa bile nereye gidebileceğini matematiksel olarak tahmin eden (Kalman Filtresi) koddur.
+qr_reader.py: Ayrı bir işlemci çekirdeğinde (multiprocessing) arka planda çalışarak, hedefe yaklaşıldığında QR kodun içeriğini (örneğin "hedef_koordinat") okuyan koddur.
+
+gz_bridge_camera.py: Gazebo kamerasından gelen görüntüyü ROS 2 topic'ine yayınlayan koddur.Gazebo simülasyonundaki (veya gerçekteki) kameradan ham görüntüyü alıp 
+qr_vision_node.py'ye saniyede 30-60 defa gönderen koddur. Eğer bu kod çalışmıyorsa vision node siyah ekran verir.
+
+
+qr2.py:  (Asıl Uçuş Kontrolcüsü): Uçağın hedefe doğru dalış yapmasını sağlayan "Kamikaze" koddur. Vizyondan gelen hedef merkezden sapma (error_x, error_y) değerlerini okur ve uçağın kanatçıklarına sinyal göndererek hedefi tam ortalamasını sağlar.
+
+bu sistemin veri akışı şöyledir qr2.py en sonda çünkü uçak kalkmadan da kamera anlık olarak veri okur ancak qr_vision_node ile aldığımız veri sayesinde anlık olarak hedef merkezini bulup qr2.py'ye gönderiyoruz.
+gz_bridge_camera -> qr_vision_node -> qr2.py
+
 """
 
 import os
 import time
 import multiprocessing
+# Çoklu işlemci kullanımı. QR okuma ağır bir işlemdir, videoyu kastırmasın ayrı bir çekirdekte (arkaplanda) çalışsın diye kullanıyoruz.
+
 
 import cv2
 import numpy as np
@@ -30,11 +55,13 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import Image
+# ROS'un standart "Fotoğraf" mesaj tipi. Kameradan gelen sinyali bu formatta alıyoruz.
+
+
 from std_msgs.msg import String
+# ROS'un standart "Metin" mesaj tipi. Okunan QR kodunu (örneğin "Koordinat: 41, 29") yazılı olarak göndermek için.
 
 # cv_bridge yerine manuel dönüşüm (NumPy versiyon uyumsuzluğunu önler)
-import numpy as np
-
 # YOLO
 try:
     from ultralytics import YOLO
@@ -43,26 +70,44 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 # Custom mesaj
+# Sadece bizim projeye özel yazdığımız sinyal dili. (İçinde hedef_x, error_y, bbox_w gibi uçağı uçuracak özel veriler var).
 from iha_messages.msg import TargetInfo
 
 # Aynı paketteki destek modülleri
+# Kamera anlık kör olsa (hedef çıksa) bile hedefin nereye gittiğini tahmin eden matematiksel kodumuz (Diğer dosyadan çekiyoruz).
 from iha_görev.qr_tracker import KalmanBoxTracker
+
+# Arka planda kasılmadan QR okuyan kodumuz.
 from iha_görev.qr_reader import AsyncQRReader
 
 # Model dizini
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 
+# Bu satır çok zekice bir iş yapar: "Benim şu an çalıştığım bu Python dosyası (qr_vision_node.py) bilgisayarda hangi klasördeyse, onun yanındaki 
+# models klasörüne git." Böylece kodu sen Samet'in bilgisayarından kendi bilgisayarına kopyalasan bile, 
+# C:/ veya /home/mert/ yolları değişse bile, kod hedef modellerini (best.pt) eliyle koymuş gibi bulur.
+
 
 # ═══════════════════════════════════════════════════════════════
 # YAPILANDIRMA PARAMETRELERİ
 # ═══════════════════════════════════════════════════════════════
-SEARCH_SIZE = 640           # SEARCH modunda resize boyutu
-TRACK_ROI_SIZE = 640        # TRACK modunda ROI boyutu
+SEARCH_SIZE = 640           # SEARCH modunda resize boyutu yolo modelinin taradığı boyut büyük olursa fps düşer
+TRACK_ROI_SIZE = 640        # TRACK modunda ROI boyutu takip ederken sadece o kısma yakın 640 boyutunda arama yapar
 CONF_THRESHOLD = 0.4        # YOLO güven eşiği
-LOST_THRESHOLD = 30         # Kaç frame kaybedilirse SEARCH'e dön
-QR_PADDING = 0.2            # QR crop çerçevesine padding oranı
+LOST_THRESHOLD = 30         # Kaç frame kaybedilirse SEARCH'e dön 
+QR_PADDING = 0.2            # QR crop çerçevesine padding oranı weChat Qr okurken panonun kenarına yaklaşıldığında padding oranı
+
+# ═══════════════════════════════════════════════════════════════
+# QR Vision Node
+
+# Yapay zeka uçağı ararken video hiç donmasın (kasıp yavaşlamasın) isteriz. QR kodu okumak ise yavaş bir işlemdir. Bu yüzden bilgisayarın beynini ikiye böleriz (Multiprocessing).
+# qr_result_queue: Yan odadaki işçinin (QR okuyucu) bize "Abi QR'ı okudum, metin şu!" diye mesaj yolladığı boru hattıdır.
+# qr_control_queue: Senin işçiye "Şimdi çalış" veya "Şimdi bekle" dediğin borudur.
+# .start(): Fabrikanın yan odasındaki bu gizli işçiyi çalışmaya başlatır. Beklemeye geçer.
 
 
+
+# ═══════════════════════════════════════════════════════════════
 class QRVisionNode(Node):
 
     def __init__(self):
@@ -74,7 +119,7 @@ class QRVisionNode(Node):
             return
 
         # ═══ YOLO Model Yükleme ═══
-        model_path = os.path.join(_MODELS_DIR, 'best.pt')
+        model_path = os.path.join(_MODELS_DIR, 'best.pt') # _MODELS_DIR path ile best.pt birleştirir ve path tam olur
         try:
             self.model = YOLO(model_path)
             self.get_logger().info(f"✅ YOLO model yüklendi: {model_path}")
@@ -83,19 +128,21 @@ class QRVisionNode(Node):
             return
 
         # ═══ QR Okuyucu (Multiprocessing) ═══
+        # bunların çalışma prensibi için qr_vision_node.py dosyasındaki yorum satırlarını okuyunuz.
         self.qr_result_queue = multiprocessing.Queue()
         self.qr_control_queue = multiprocessing.Queue()
         self.qr_reader = AsyncQRReader(self.qr_result_queue, self.qr_control_queue)
         self.qr_reader.start()
 
         # ═══ Kalman Tracker ═══
+        # bu nesne qr_tracker.py'dan çekildi
         self.tracker = KalmanBoxTracker()
 
         # ═══ Durum Değişkenleri ═══
         self.state = "SEARCH"       # SEARCH veya TRACK
-        self.missed_count = 0
-        self.locked_qr = None       # Okunan QR metni (kilitlendi mi?)
-        self.last_known_box = None   # Son bilinen hedef kutusu [x, y, w, h]
+        self.missed_count = 0       # Hedefi art arda kaç kere göremediğimizi sayar. (LOST_THRESHOLD'u geçerse TRACK biter).
+        self.locked_qr = None       # Okunan QR metni (kilitlendi mi?)  # Hedefteki QR kod okunduğunda metin buraya yazılır. None=Henüz okuyamadık.
+        self.last_known_box = None   # Son bilinen hedef kutusu [x, y, w, h] # Hedefin ekranda en son nerede görüldüğünün kutusu [X, Y, Genişlik, Yükseklik].
         self.prev_time = time.time()
 
         # Frame boyutları (ilk frame'de güncellenecek)
@@ -104,8 +151,21 @@ class QRVisionNode(Node):
         self.frame_center = (320, 240)
 
         # ═══ ROS 2 Parametreleri ═══
+        #declare_parameter('camera_topic', '/camera/image_raw'): "Ben bu koda dışarıdan müdahale edilebilir bir ayar düğmesi (Parametre) ekliyorum.
+        #Adı da camera_topic olsun. Eğer kimse dışarıdan bana aksini söylemezse, varsayılan (default) olarak /camera/image_raw kanalını dinleyeceğim" der.
+        
+
+        #self.declare_parameter(): ROS 2'ye "Bana bir ayar düğmesi tanımla" deme komutu.
+        #self.get_parameter(): ROS 2'den "O ayar düğmesinin şu anki değeri ne?" diye sorma komutu.
+
         self.declare_parameter('camera_topic', '/camera/image_raw')
+        #get_parameter(...).value: O anki ayar düğmesinin (parametrenin) üstünde hangi değerin yazdığını okuyup camera_topic isimli kelime haznesine (
+        #değişkene) atar. Sonra da aşağıdaki dinleyici (Subscriber) fonksiyona "Al bak, bu kamera kanalını dinleyeceksin" diye bu değişkeni verir.
         camera_topic = self.get_parameter('camera_topic').value
+
+
+        #!!!!
+        #ros2 run iha_otopilot qr_vision --ros-args -p camera_topic:=/usb_cam/image
 
         # ═══ ROS 2 Subscriber (BEST_EFFORT QoS — Gazebo kamera ile uyumlu) ═══
         sensor_qos = QoSProfile(
@@ -121,6 +181,7 @@ class QRVisionNode(Node):
         self.qr_text_pub = self.create_publisher(String, '/gorev/qr_result', 10)
 
         # ═══ GUI Penceresi ═══
+
         self.win_name = "KAMIKAZE QR SYSTEM"
         cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
 
@@ -131,6 +192,13 @@ class QRVisionNode(Node):
 
     # ═══════════════════════════════════════════════════════════════
     # ROS IMAGE → OPENCV (cv_bridge olmadan)
+    # ROS'tan gelen kameranın nasıl bir resim yolladığını kontrol eder:
+    # Renkli resimse (Kırmızı, Yeşil, Mavi) -> 3 kanal (channels = 3) vardır.
+    # Siyah/Beyaz gece görüş kamerasıysa (mono) -> Sadece grilik vardır, yani 1 kanal (channels = 1).
+    # Arkası saydam bir resimse (rgba) -> 4 kanal vardır.
+
+
+
     # ═══════════════════════════════════════════════════════════════
     def _imgmsg_to_cv2(self, msg):
         """ROS Image mesajını OpenCV BGR formatına çevir (cv_bridge gerektirmez)."""
@@ -145,6 +213,11 @@ class QRVisionNode(Node):
             channels = 3  # Varsayılan
 
         img = np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, msg.width, channels)
+        # Burası fonksiyonun kalbidir. msg.data dediğimiz şey, 
+        # milyonlarca anlamsız sayının yan yana dizildiği upuzun bir listedir (
+        # Örn: [255, 0, 12, 54, 255...]). Bu liste bilgisayar için hiçbir şey ifade etmez. 
+        # reshape(Yükseklik, Genişlik, RenkKanalı) komutu şunu yapar: "Bu upuzun ipliği alıp, örneğin 640x480 boyutunda bir kilim dokur gibi dikdörtgen bir resim haline getir."
+        #  Artık elimizde gerçek bir görüntü vardır.
 
         # RGB → BGR dönüşümü (OpenCV BGR kullanır)
         if msg.encoding == 'rgb8':
@@ -184,18 +257,24 @@ class QRVisionNode(Node):
         self.prev_time = curr_time
 
         # ═══ QR Sonuç Kontrolü ═══
+        # get_nowait(): Buradaki "no wait" (bekleme yok) kısmı çok kritiktir. Normalde birinden cevap beklerken o cevap gelene kadar donup kalırsın. Ama biz kameradan saniyede 30 tane resim alıyoruz, donup beklemeye vaktimiz yok!
+        # Bu komut şunu der: "Hey işçi, telsizde bana yolladığın bir QR sonucu var mı? Varsa hemen ver, yoksa hiç bekletme ben işime (video akıtmaya) devam ediyorum." Eğer telsizde bekleyen bir mesaj yoksa bu komut hata fırlatır, biz de o hatayı aşağıdaki except Exception: pass ile sessizce görmezden geliriz.
+
         try:
             res = self.qr_result_queue.get_nowait()
             if res:
                 if self.locked_qr is None:
                     self.locked_qr = res
                     self.get_logger().info(f"🔥 QR KİLİTLENDİ: {res}")
+                    # Ekrana "Kilitlendim" bilgisini yazar.
+                    # self.qr_control_queue.put("PAUSE"): Bu çok akıllıca bir enerji tasarrufudur. Zaten QR kodunu 1 kere okuduk ve ne yazdığını (hedefin ne olduğunu) öğrendik. Artık hedefin üzerine inene kadar her saniye o aynı QR kodunu tekrar tekrar okumakla işlemciyi yormaya gerek var mı? Hayır! İşçimize diğer telsizden "PAUSE" (Bekle) komutu göndeririz. İşçi işlemciyi meşgul etmeyi bırakır. (Eğer hedefi kaybedersek ileride işçiye tekrar "RESUME" deyip onu uyandıracağız).
                     self.qr_control_queue.put("PAUSE")
 
                     # QR metnini ROS topic'e yayınla
                     qr_msg = String()
                     qr_msg.data = str(res)
                     self.qr_text_pub.publish(qr_msg)
+                    print(f"QR KİLİTLENDİ: {res}")
         except Exception:
             pass
 
@@ -228,6 +307,14 @@ class QRVisionNode(Node):
 
         # Hız için resize
         scale = SEARCH_SIZE / w_org
+        # cv2.resize ile gelen frame (fotoğraf) yeni boyutlara sıkıştırılır.\n        
+        # Yeni boyutlar (Genişlik=SEARCH_SIZE=640, Yükseklik=h_search=360 vb.) şeklindedir.\n        
+
+        # Sen kodun en başında SEARCH_SIZE = 640 diye bir kural koymuştun ("Ben resmi 640 genişliğe küçültmek istiyorum" demiştin). Burada bilgisayar soruyor: "1920'yi kaça bölersem veya neyle çarparsam 640 olur?"
+        # scale = 640 / 1920
+        # scale = 0.33 (Yani resmin 3'te 1'i kadar küçülmesi lazım)
+        
+
         h_search = int(h_org * scale)
         frame_input = cv2.resize(frame, (SEARCH_SIZE, h_search))
 
@@ -252,11 +339,17 @@ class QRVisionNode(Node):
         if detected_box_global:
             self.state = "TRACK"
             self.tracker.init(detected_box_global)
+
+            # Gördüğümüz bu hedefin koordinatlarını last_known_box (Bilinen Son Kutu) isimli hafızamıza kaydederiz. 
+            # Uçuş kontrolcüsü (qr2.py - Kamikaze kodumuz) uçağı kanatçıklarla yönlendirirken "Bana hedefin son görüldüğü yeri verin" 
+            # derse diye cebimizde tutarız.
             self.last_known_box = detected_box_global
             self.missed_count = 0
             self.get_logger().info("✅ Hedef Bulundu! → TRACK moduna geçildi.")
 
         return detected_box_global
+
+
 
     # ═══════════════════════════════════════════════════════════════
     # TRACK MODU
