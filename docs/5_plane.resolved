@@ -1,0 +1,103 @@
+# Walkthrough: Multi-UAV 6 İHA Simülasyonu
+
+## Yapılan Değişiklikler
+
+### Mimari
+
+```
+Gazebo (yunuseli dünyası)
+├── advanced_plane × 5  (hedef — inst 0..4)
+└── advanced_plane_cam × 1  (avcı — inst 5)
+
+PX4 SITL × 6 → MAVROS × 6
+├── /uav1..uav5/mavros/  (hedef İHA'lar)
+└── /hunter/mavros/       (avcı İHA)
+```
+
+### Port Tablosu
+
+| İHA | Inst | Send | Listen | MAVROS fcu_url |
+|------|------|------|--------|---------------|
+| uav1 | 0 | 14540 | 14580 | `udp://:14540@127.0.0.1:14580` |
+| uav2 | 1 | 14541 | 14581 | `udp://:14541@127.0.0.1:14581` |
+| uav3 | 2 | 14542 | 14582 | `udp://:14542@127.0.0.1:14582` |
+| uav4 | 3 | 14543 | 14583 | `udp://:14543@127.0.0.1:14583` |
+| uav5 | 4 | 14544 | 14584 | `udp://:14544@127.0.0.1:14584` |
+| hunter | 5 | 14545 | 14585 | `udp://:14545@127.0.0.1:14585` |
+
+---
+
+### Değiştirilen / Oluşturulan Dosyalar
+
+| Dosya | İşlem | Açıklama |
+|-------|-------|----------|
+| [multi_sim.launch.py](file:///home/mert/multi_ws/src/multi_sim/launch/multi_sim.launch.py) | MODIFY | 6 İHA + yunuseli world |
+| [comm_logger.py](file:///home/mert/multi_ws/src/multi_control/multi_control/comm_logger.py) | MODIFY | 5 hedef + hunter desteği |
+| [waypoint_follower.py](file:///home/mert/multi_ws/src/multi_control/multi_control/waypoint_follower.py) | NEW | 5 farklı rota takibi |
+| [hunter_controller.py](file:///home/mert/multi_ws/src/multi_control/multi_control/hunter_controller.py) | NEW | Avcı otonom kontrol |
+| [setup.py](file:///home/mert/multi_ws/src/multi_control/setup.py) | MODIFY | Yeni entry points |
+| worlds/yunuseli.sdf | COPY | sartek_ws'den kopyalandı |
+| models/yunuseli_zemin | COPY | Dünya zemini |
+| models/qr_kodu_yuzeyi | COPY | QR kodu modeli |
+
+---
+
+## Doğrulama
+
+- ✅ PX4 airframe [4050_gz_advanced_plane_cam](file:///home/mert/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/4050_gz_advanced_plane_cam) doğrulandı
+- ✅ `colcon build --symlink-install` başarılı
+- ✅ Tüm executable'lar install dizininde mevcut
+- ✅ Dünya ve model dosyaları kopyalandı
+
+---
+
+## Kullanım
+
+### 1. Simülasyonu Başlat
+```bash
+cd ~/multi_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch multi_sim multi_sim.launch.py
+```
+
+### 2. Hedef İHA'ları Uçur (her biri ayrı terminal)
+```bash
+ros2 run multi_control waypoint_follower --ros-args -p namespace:=uav1 -p route_id:=0
+ros2 run multi_control waypoint_follower --ros-args -p namespace:=uav2 -p route_id:=1
+ros2 run multi_control waypoint_follower --ros-args -p namespace:=uav3 -p route_id:=2
+ros2 run multi_control waypoint_follower --ros-args -p namespace:=uav4 -p route_id:=3
+ros2 run multi_control waypoint_follower --ros-args -p namespace:=uav5 -p route_id:=4
+```
+
+### 3. Avcı İHA'yı Başlat
+```bash
+ros2 run multi_control hunter_controller
+```
+
+> [!TIP]
+> Hunter [nearest](file:///home/mert/multi_ws/src/multi_control/multi_control/hunter_controller.py#158-174) mod (varsayılan) ile en yakın hedefe uçar. [sequential](file:///home/mert/multi_ws/src/multi_control/multi_control/hunter_controller.py#175-194) moda geçmek için:
+> `--ros-args -p selection_mode:=sequential`
+
+### 4. Durumu İzle
+```bash
+ros2 topic echo /uav1/mavros/state --once
+ros2 topic echo /hunter/mavros/state --once
+ros2 topic list | grep -E "uav[1-5]|hunter"
+```
+
+---
+
+## Geri Alma
+
+Eski haline dönmek için:
+```bash
+cp ~/multi_ws/backup_20260301/multi_sim.launch.py ~/multi_ws/src/multi_sim/launch/
+cp ~/multi_ws/backup_20260301/comm_logger.py ~/multi_ws/src/multi_control/multi_control/
+cp ~/multi_ws/backup_20260301/setup_control.py ~/multi_ws/src/multi_control/setup.py
+cp ~/multi_ws/backup_20260301/start.txt ~/multi_ws/
+cd ~/multi_ws && colcon build --symlink-install
+```
+
+> [!WARNING]
+> 6 PX4 instance yüksek kaynak gerektirir. 16 GB+ RAM önerilir.

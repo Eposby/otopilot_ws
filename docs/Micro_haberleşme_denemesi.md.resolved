@@ -1,0 +1,94 @@
+# Walkthrough: Hibrit MAVROS + MicroXRCE-DDS Mimarisi
+
+## Ne Yapıldı
+
+6 MAVROS instance'ın neden olduğu **DDS topic type çakışmasını** çözmek için hibrit mimariye geçildi:
+
+| İHA | Protokol | Neden |
+|-----|----------|-------|
+| uav1..uav5 (hedefler) | **MicroXRCE-DDS** (px4_msgs) | Hafif, çakışma yok, tek agent yeterli |
+| hunter (avcı) | **MAVROS** | Mevcut MAVROS tabanlı kodlarınız çalışmaya devam etsin |
+
+## Mimari
+
+```
+ROS 2 (Humble)
+├── target_offboard (5×)  ←→  MicroXRCEAgent (UDP:8888)  ←→  PX4 #0..#4
+├── hunter_controller     ←→  MAVROS (/hunter ns)          ←→  PX4 #5
+└── comm_logger           ←→  her iki protokolü dinler
+```
+
+## Değiştirilen Dosyalar
+
+### [NEW] [target_offboard.py](file:///home/mert/multi_ws/src/multi_control/multi_control/target_offboard.py)
+px4_msgs tabanlı doğrudan PX4 kontrol. MAVROS gerekmez.
+- `OffboardControlMode` + `TrajectorySetpoint` gönderir
+- `VehicleCommand` ile ARM/OFFBOARD mod geçişi yapar
+- NED frame kullanır (z negatif = yukarı)
+
+### [MODIFY] [multi_sim.launch.py](file:///home/mert/multi_ws/src/multi_sim/launch/multi_sim.launch.py)
+- 5 hedef MAVROS **kaldırıldı** → yerine MicroXRCEAgent + target_offboard node'ları
+- `PX4_UXRCE_DDS_NS` ile her PX4'e namespace verildi (uav1, uav2, ...)
+- Hunter MAVROS korundu
+
+### [MODIFY] [hunter_controller.py](file:///home/mert/multi_ws/src/multi_control/multi_control/hunter_controller.py)
+- Hedef pozisyonları artık `px4_msgs::VehicleLocalPosition` üzerinden okunuyor
+- Hunter'ın kendi kontrolü MAVROS'tan (değişmedi)
+- NED→ENU frame dönüşümü eklendi
+
+### [MODIFY] [comm_logger.py](file:///home/mert/multi_ws/src/multi_control/multi_control/comm_logger.py)
+- Hedefler: `px4_msgs::VehicleStatus` + `BatteryStatus`
+- Hunter: MAVROS `State` + `BatteryState`
+- CSV'ye `protocol` sütunu eklendi
+
+### [MODIFY] [package.xml](file:///home/mert/multi_ws/src/multi_control/package.xml) / [setup.py](file:///home/mert/multi_ws/src/multi_control/setup.py)
+[px4_msgs](file:///home/mert/otopilot_ws/src/px4_msgs) dependency + `target_offboard` entry point eklendi
+
+## Port Açıklaması
+
+PX4 SITL instance=N:
+- MAVLink gönderme portu: `14540 + N`
+- MAVLink dinleme portu: `14580 + N`
+
+Hunter (instance=5): portlar **14545 / 14585**
+
+MAVROS `fcu_url` formatı: `udp://:[PX4_SEND]@127.0.0.1:[PX4_LISTEN]`
+→ `udp://:14545@127.0.0.1:14585`
+
+> [!NOTE]
+> Eski komutunuzda `udp://:14540@127.0.0.1:14557` yazıyordu. Bu instance=0 (uav1) portları. Hunter instance=5 olduğu için doğru port **14545/14585**'tir.
+
+## NED vs ENU Frame
+
+| | x | y | z |
+|--|---|---|---|
+| PX4 (NED) | Kuzey | Doğu | **Aşağı** (+ = yere doğru) |
+| MAVROS (ENU) | Doğu | Kuzey | **Yukarı** (+ = göğe doğru) |
+
+[target_offboard.py](file:///home/mert/multi_ws/src/multi_control/multi_control/target_offboard.py) NED kullanır → yükseklik **negatif** verilir (ör: z=-50 = 50m yükseklik)
+[hunter_controller.py](file:///home/mert/multi_ws/src/multi_control/multi_control/hunter_controller.py) hedef pozisyonlarını okurken `z` → `-z` dönüşümü yapar
+
+## Çalıştırma
+
+```bash
+# 1) Temizlik
+pkill -9 -f px4; pkill -9 -f gz; pkill -9 -f ruby; pkill -9 -f mavros; \
+pkill -9 -f MicroXRCEAgent; sleep 2
+
+# 2) Launch
+cd ~/multi_ws
+source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 launch multi_sim multi_sim.launch.py
+
+# 3) Doğrulama (ayrı terminal)
+source /opt/ros/humble/setup.bash && source ~/multi_ws/install/setup.bash
+# Hedefler (uXRCE-DDS)
+ros2 topic echo /uav1/fmu/out/vehicle_status --once
+# Hunter (MAVROS)
+ros2 topic echo /hunter/mavros/state --once
+```
+
+## Verification
+
+- ✅ `colcon build` başarılı (multi_control + multi_sim)
+- ✅ Tüm modüller import edilebiliyor (target_offboard, hunter_controller, comm_logger)

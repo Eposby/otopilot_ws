@@ -110,30 +110,47 @@ class AsyncQRReader(multiprocessing.Process):
             if detector is None: continue
 
             try:
-                # 3. Blur Check (Efficiency)
-                # If frame is too blurry, skip heavy processing
-                # Threshold logic: small images naturally have lower variance,
-                # so we adjust threshold or just be lenient.
-                # For now, let's just log or be very conservative (e.g. 50).
-                # Skipping this for now to ensure robustness, or maybe just log it.
-                # if self._is_blurry(frame, threshold=50.0):
-                #     continue
+                # 1. AKTİF: Bulanıklık Kontrolü (Blur Check) Eklentisi
+                # Resim çok bulanıksa ağır işlemleri yapıp CPU'yu yormadan direkt atlar.
+                # Threshold değerini 30 olarak belirliyoruz (sadece çok bulanıkları eler)
+                if self._is_blurry(frame, threshold=30.0):
+                    continue
 
                 found_qr = None
+                
+                # --- ÇOK AŞAMALI (MULTI-STAGE) YÜKSEK İRTİFA QR OKUMA PIPELINE'I ---
 
-                # --- PIPELINE ---
-
-                # A. Raw
+                # A. Raw (Ham Görüntü) Okuma
                 res, _ = detector.detectAndDecode(frame)
                 if len(res) > 0 and len(res[0]) > 0:
                     found_qr = res[0]
 
-                # B. CLAHE
+                # B. PERSPEKTİF DÜZELTME EKLENTİSİ (Açılı Kamerayı Düze Çevir)
+                # Uçak açılı yaklaşıyorsa QR kodu yamuk (Trapezoid) görünür. 
+                # Standart OpenCV dedektörü ile 4 köşeyi arayıp homography ile resmi düze çekeriz.
                 if not found_qr:
-                    if len(frame.shape) == 3:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    else:
-                        gray = frame
+                    cv2_qr = cv2.QRCodeDetector()
+                    ret, points = cv2_qr.detect(frame)
+                    if ret and points is not None:
+                        pts = points[0]
+                        w_warp, h_warp = 300, 300 # İdeal okuma boyutu
+                        pts_dst = np.array([
+                            [0, 0],
+                            [w_warp - 1, 0],
+                            [w_warp - 1, h_warp - 1],
+                            [0, h_warp - 1]
+                        ], dtype=np.float32)
+                        
+                        matrix = cv2.getPerspectiveTransform(pts, pts_dst)
+                        warped = cv2.warpPerspective(frame, matrix, (w_warp, h_warp))
+                        
+                        res, _ = detector.detectAndDecode(warped)
+                        if len(res) > 0 and len(res[0]) > 0:
+                            found_qr = res[0]
+
+                # C. CLAHE (Kontrast ve Parlaklık Düzeltme)
+                if not found_qr:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
                     enhanced = clahe.apply(gray)
                     input_2 = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
@@ -141,33 +158,43 @@ class AsyncQRReader(multiprocessing.Process):
                     if len(res) > 0 and len(res[0]) > 0:
                         found_qr = res[0]
 
-                # C. Turbo (Upscale + Sharpen)
+                # D. ÇOKLU ÖLÇEK (MULTI-SCALE) & MORFOLOJİK İŞLEMLER EKLENTİSİ
                 if not found_qr:
-                    # Reuse enhanced
                     if 'enhanced' not in locals():
-                         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
                          enhanced = clahe.apply(gray)
 
-                    # Upscale 2x
-                    zoomed = cv2.resize(enhanced, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                    sharpened = self._unsharp_mask(zoomed, sigma=1.0, amount=1.5)
-                    input_3 = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+                    # Multi-scale denemeleri: İHA'nın yüksekliğine göre farklı ölçeklerde (1.5x, 2.0x, 3.0x) büyütmeyi deneriz.
+                    scales = [1.5, 2.0, 3.0]
+                    for scale in scales:
+                        zoomed = cv2.resize(enhanced, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                        sharpened = self._unsharp_mask(zoomed, sigma=1.0, amount=1.5)
+                        input_3 = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
-                    res, _ = detector.detectAndDecode(input_3)
-                    if len(res) > 0 and len(res[0]) > 0:
-                        found_qr = res[0]
-                    else:
-                        # D. Threshold
-                        thresh = cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-                        input_4 = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-                        res, _ = detector.detectAndDecode(input_4)
+                        res, _ = detector.detectAndDecode(input_3)
                         if len(res) > 0 and len(res[0]) > 0:
                             found_qr = res[0]
+                            break # Bulduğumuz an zaman kaybetmeden döngüden çık
+                        
+                        # Hala bulamadıysa (Çok kötü/Puslu Işık): Adaptive Threshold ve Morfolojik Filtreler!
+                        if not found_qr:
+                            thresh = cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                            
+                            # YENİ: Morfolojik Temizlik (Kapanış İşlemi) Eklentisi
+                            # Bu işlem QR kod üzerindeki beyaz kireçlenmeleri ve güneş parazitlerini doldurur, pikselleri bütünleştirir.
+                            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                            
+                            input_4 = cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
+                            res, _ = detector.detectAndDecode(input_4)
+                            if len(res) > 0 and len(res[0]) > 0:
+                                found_qr = res[0]
+                                break
 
+                # Eğer herhangi bir aşamada hedef başarıyla bulunduysa merkeze bildir ve uykuya geç
                 if found_qr:
                     self.result_queue.put(found_qr)
-                    paused = True # Auto-pause locally to save CPU immediately?
-                    # No, let main controller decide logic.
+                    paused = True 
 
             except Exception as e:
                 # print(f"QR Process Error: {e}")

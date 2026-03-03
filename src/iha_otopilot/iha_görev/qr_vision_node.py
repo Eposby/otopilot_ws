@@ -41,6 +41,23 @@ qr2.py:  (Asıl Uçuş Kontrolcüsü): Uçağın hedefe doğru dalış yapmasın
 bu sistemin veri akışı şöyledir qr2.py en sonda çünkü uçak kalkmadan da kamera anlık olarak veri okur ancak qr_vision_node ile aldığımız veri sayesinde anlık olarak hedef merkezini bulup qr2.py'ye gönderiyoruz.
 gz_bridge_camera -> qr_vision_node -> qr2.py
 
+
+
+OUTPUT
+[INFO] [1772483359.360269641] [qr_vision_node]: ═══ QR Vision Node başlatıldı ═══
+[INFO] [1772483359.360475975] [qr_vision_node]:     Kamera: /camera/image_raw
+[INFO] [1772483359.360631277] [qr_vision_node]:     QR Target: /gorev/qr_target_info
+[INFO] [1772483359.360808160] [qr_vision_node]:     QR Result: /gorev/qr_result
+🚀 QR Process: Starting...
+✅ QR Process: Ready.
+[INFO] [1772483434.478670442] [qr_vision_node]: ✅ Hedef Bulundu! → TRACK moduna geçildi.
+[INFO] [1772483435.302906987] [qr_vision_node]: 🔥 QR KİLİTLENDİ: sartek2025
+QR KİLİTLENDİ: sartek2025
+[WARN] [1772483436.406893354] [qr_vision_node]: ⚠️ Hedef Kayıp → SEARCH moduna dönüldü.
+^CProcess AsyncQRReader-1:
+[INFO] [1772483442.116734406] [qr_vision_node]: 🛑 QR Vision Node kapatılıyor...
+
+
 """
 
 import os

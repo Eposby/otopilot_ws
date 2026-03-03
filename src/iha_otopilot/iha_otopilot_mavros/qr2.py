@@ -8,9 +8,11 @@ Görev Akışı:
 
 Uçuş Mantığı:
     - Uçak her zaman QR noktasına doğru gider (lineer güzergah)
-    - QR'a 200m kalana kadar: Normal setpoint
-    - 200m - 60m arası: Yavaşla (hala QR hedefli)
-    - 60m'de: Kamikaze dalışı başlar (attitude control)
+    - QR'a 400m kalana kadar: Normal seyir (25 m/s)
+    - 400m - 200m arası: Yavaşla (FW_AIRSPD_MAX=14 m/s)
+    - 200m - 85m arası: Aktif frenleme (pitch yukarı + thrust %5)
+    - 85m'de VE hız < 13 m/s: Kamikaze dalışı başlar (attitude control)
+    - 50m'de: Pull-up başlar
     - Pull-up sonrası: Recovery noktasına git
 
 Çalıştırma:
@@ -55,20 +57,22 @@ CRUISE_ALT = 110.0           # Seyir irtifası (m)
 RECOVERY_DISTANCE = 150.0    # QR'dan recovery noktası mesafesi (m)
 
 # Mesafe eşikleri
-SLOWDOWN_DISTANCE = 300.0    # Bu mesafeden sonra yavaşla
-DIVE_DISTANCE = 110.0         # Bu mesafede kamikaze başlar
+SLOWDOWN_DISTANCE = 400.0    # Bu mesafeden sonra yavaşla (FW_AIRSPD_MAX=14)
+BRAKE_DISTANCE = 200.0       # Bu mesafede aktif frenleme başlar (pitch up + thrust %5)
+DIVE_DISTANCE = 85.0         # Bu mesafede kamikaze başlar (trig: 60m dikey / tan45° = 60m yatay → hipot ≈ 85m)
 
 # Hız Parametreleri (PX4 FW_AIRSPD_MAX dinamik değişim)
 CRUISE_AIRSPEED = 25.0       # Normal seyir hızı (m/s)
 SLOWDOWN_AIRSPEED = 14.0     # Yavaşlama hızı (m/s)
+BRAKE_AIRSPEED = 11.0        # Frenleme hedef hızı (FW_AIRSPD_MIN'e yakın)
+DIVE_ENTRY_SPEED = 13.0      # Dalışa giriş için max hız eşiği (m/s)
 
 # Kamikaze Parametreleri
-# publish attitude içinde +pitch = burun aşağı, -pitch = burun yukarı çünkü base_link frame kullanılıyor base_link'te uçağın burnu x ekseninde, sağ kanadı y ekseninde, aşağısı z ekseninde olur
-
-
+# publish attitude içinde +pitch = burun aşağı, -pitch = burun yukarı çünkü base_link frame kullanılıyor
+# base_link'te uçağın burnu x ekseninde, sağ kanadı y ekseninde, aşağısı z ekseninde olur
 DIVE_ANGLE = 45.0            # Dalış açısı (derece)
 PULLUP_ALT = 50.0            # Pull-up başlama irtifası (m)
-DIVE_THRUST = 0.1
+DIVE_THRUST = 0.0            # Dalışta motor tamamen kapalı (yerçekimi yeterli)
 PULLUP_THRUST = 0.8
 
 
@@ -264,10 +268,11 @@ class QR2(Node):
     def execute_goto_qr(self):
         """
         QR noktasına git - hedef HER ZAMAN QR.
-        Mesafeye göre fazlar:
-            > 300m: Normal seyir (setpoint)
-            300m - 110m: Yavaşlama (FW_AIRSPD_MAX düşürülür)
-            < 110m: Kamikaze tetikle
+        Mesafeye göre 4 faz:
+            > 400m: CRUISE — Normal seyir 25 m/s
+            400m - 200m: SLOWDOWN — FW_AIRSPD_MAX=14 m/s
+            200m - 85m: BRAKING — Aktif frenleme (pitch yukarı + thrust %5)
+            < 85m VE hız < 13 m/s: DIVE_TRIGGER — Kamikaze tetikle
         """
         if self.task_state == 0:
             self.get_logger().info(f">> GOTO_QR: Hedef ({self.qr_x:.0f}, {self.qr_y:.0f})")
@@ -285,29 +290,49 @@ class QR2(Node):
         elif self.task_state == 1:
             dist_to_qr = self.distance_to(self.qr_x, self.qr_y)
             
-            # Hedefi sürekli güncelle (GOTO_QR'da hedef sabit zaten)
-            self.current_target_x = self.qr_x
-            self.current_target_y = self.qr_y
-            self.current_target_z = CRUISE_ALT
-            
-            # ═══ DİNAMİK HIZ LİMİTİ (SAFKOD) ═══
+            # ═══ 4 FAZLI DİNAMİK HIZ KONTROLÜ ═══
             if dist_to_qr > SLOWDOWN_DISTANCE:
+                # FAZ 1: CRUISE — Normal seyir
+                self.current_target_x = self.qr_x
+                self.current_target_y = self.qr_y
+                self.current_target_z = CRUISE_ALT
+                self.enable_position_setpoint = True
                 self.set_desired_speed(CRUISE_AIRSPEED)
                 phase = "CRUISE"
-            elif dist_to_qr > DIVE_DISTANCE:
+
+            elif dist_to_qr > BRAKE_DISTANCE:
+                # FAZ 2: SLOWDOWN — FW_AIRSPD_MAX düşürülür
+                self.current_target_x = self.qr_x
+                self.current_target_y = self.qr_y
+                self.current_target_z = CRUISE_ALT
+                self.enable_position_setpoint = True
                 self.set_desired_speed(SLOWDOWN_AIRSPEED)
                 phase = "SLOWDOWN"
+
+            elif dist_to_qr > DIVE_DISTANCE or self.current_speed > DIVE_ENTRY_SPEED:
+                # FAZ 3: BRAKING — Aktif frenleme
+                # Position setpoint'i durdur, attitude ile frenle
+                self.enable_position_setpoint = False
+                self.set_desired_speed(BRAKE_AIRSPEED)
+                
+                # Pitch yukarı (-5°) + düşük thrust (%5) = "paraşüt etkisi"
+                # Uçağın burnunu hafif yukarı kaldırarak drag artırılır ve hız düşer
+                yaw = self.yaw_to(self.qr_x, self.qr_y)
+                self.publish_attitude(roll=0.0, pitch=-5.0, yaw=yaw, thrust=0.05)
+                phase = "BRAKING"
+
             else:
+                # FAZ 4: DIVE_TRIGGER — Hız yeterince düşük, dalışa hazır
                 phase = "DIVE_TRIGGER"
 
             if self.log_counter % 20 == 0:
                 self.get_logger().info(f"   {phase} | QR: {dist_to_qr:.0f}m | Hız: {self.current_speed:.1f} m/s | Alt: {self.current_pos['z']:.0f}m")
             self.log_counter += 1
 
-            # KAMIKAZE TETİKLEME
-            if dist_to_qr <= DIVE_DISTANCE:
-                self.get_logger().info(f">> KAMİKAZE TETİKLENDİ (QR: {dist_to_qr:.0f}m)")
-                self.enable_position_setpoint = False  # Kamikaze'de attitude kullanılacağı için position setpoint'i durdur
+            # KAMIKAZE TETİKLEME — sadece mesafe VE hız koşulu sağlanınca
+            if dist_to_qr <= DIVE_DISTANCE and self.current_speed <= DIVE_ENTRY_SPEED:
+                self.get_logger().info(f">> KAMİKAZE TETİKLENDİ (QR: {dist_to_qr:.0f}m | Hız: {self.current_speed:.1f} m/s)")
+                self.enable_position_setpoint = False
                 self.finish_task()
 
 
@@ -370,8 +395,8 @@ class QR2(Node):
                 self.get_logger().info(f"   PULL-UP DÜZ | Pitch: -30° | Roll: 0° | Alt: {alt:.0f}m")
             self.log_counter += 1
             
-            if alt > 70.0:
-                self.get_logger().info(">> PULL-UP FAZI 2: DÖNÜŞ")
+            if alt > 60.0:
+                self.get_logger().info(">> PULL-UP FAZI 2: YUMUŞAK ÇIKIŞ")
                 self.task_state = 3
 
         # ═══ PULL-UP FAZI 2: YUMUŞAK ÇIKIŞ ═══
@@ -383,7 +408,7 @@ class QR2(Node):
                 self.get_logger().info(f"   PULL-UP YUMUŞAK | Pitch: -15° | Alt: {alt:.0f}m")
             self.log_counter += 1
             
-            if alt > 85.0:
+            if alt > 75.0:
                 self.get_logger().info(">> KAMİKAZE TAMAMLANDI - Recovery'ye dönülüyor")
                 self.finish_task()
 
